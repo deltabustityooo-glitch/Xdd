@@ -1,0 +1,1644 @@
+```lua
+-- ══════════════════════════════════════════════════════════════════════
+--  Fe UGC Animations Studio v3.0 — ULTRA EDITION
+--  Neon Glass UI • Live Search • Auto-Sync • Presets • Toast System
+-- ══════════════════════════════════════════════════════════════════════
+
+local Players        = game:GetService("Players")
+local AssetService   = game:GetService("AssetService")
+local AvatarEditor   = game:GetService("AvatarEditorService")
+local RunService     = game:GetService("RunService")
+local HttpService    = game:GetService("HttpService")
+local ContentProv    = game:GetService("ContentProvider")
+local TweenService   = game:GetService("TweenService")
+local UserInput      = game:GetService("UserInputService")
+local LP             = Players.LocalPlayer
+
+-- ─── Files ────────────────────────────────────────────────────────────
+local F_CACHE     = "fua3_cache.json"
+local F_EQUIPPED  = "fua3_equipped.json"
+local F_PRESETS   = "fua3_presets.json"
+local F_BOOKMARKS = "fua3_bookmarks.json"
+local CACHE_URL   = "https://raw.githubusercontent.com/TribalFootball/TuffTeto/main/animation_bundle_data_cache.json"
+
+-- ─── Slots ────────────────────────────────────────────────────────────
+local SLOT_TO_FOLDER = {
+    idleanimation="idle", walkanimation="walk", runanimation="run",
+    jumpanimation="jump", fallanimation="fall", climbanimation="climb",
+    swimidleanimation="swimidle", swimanimation="swim",
+}
+local SLOT_LABELS = {
+    idleanimation="Idle", walkanimation="Walk", runanimation="Run",
+    jumpanimation="Jump", fallanimation="Fall", climbanimation="Climb",
+    swimidleanimation="S.Idle", swimanimation="Swim",
+}
+local SLOT_ORDER = {
+    "idleanimation","walkanimation","runanimation","jumpanimation",
+    "fallanimation","climbanimation","swimidleanimation","swimanimation"
+}
+local SLOT_ICONS = {
+    idleanimation="🧍", walkanimation="🚶", runanimation="🏃",
+    jumpanimation="⬆", fallanimation="⬇", climbanimation="🧗",
+    swimidleanimation="🏊", swimanimation="🌊",
+}
+
+-- ─── Palette — Deep Neon Glass ─────────────────────────────────────────
+local C = {
+    bg0     = Color3.fromRGB(8,   10,  18),
+    bg1     = Color3.fromRGB(12,  15,  26),
+    bg2     = Color3.fromRGB(18,  22,  38),
+    bg3     = Color3.fromRGB(24,  30,  52),
+    bg4     = Color3.fromRGB(32,  40,  68),
+    card    = Color3.fromRGB(20,  25,  44),
+    cardHi  = Color3.fromRGB(30,  38,  62),
+    glass   = Color3.fromRGB(255,255,255),
+
+    neon    = Color3.fromRGB(80,  160, 255),
+    neon2   = Color3.fromRGB(120, 80,  255),
+    neonG   = Color3.fromRGB(60,  220, 140),
+    neonP   = Color3.fromRGB(200, 80,  255),
+    neonR   = Color3.fromRGB(255, 70,  90),
+    gold    = Color3.fromRGB(255, 210, 60),
+    orange  = Color3.fromRGB(255, 140, 50),
+
+    textHi  = Color3.fromRGB(240, 244, 255),
+    textMid = Color3.fromRGB(160, 170, 210),
+    textLo  = Color3.fromRGB(80,  90,  130),
+    stroke  = Color3.fromRGB(40,  50,  90),
+    strokeHi= Color3.fromRGB(80,  100, 180),
+    white   = Color3.new(1,1,1),
+    black   = Color3.new(0,0,0),
+    overlay = Color3.fromRGB(5,   7,   14),
+}
+
+-- ─── Scale ────────────────────────────────────────────────────────────
+local VP    = workspace.CurrentCamera.ViewportSize
+local SCALE = math.clamp(math.min(VP.X/1920, VP.Y/1080)*1.55, 0.52, 2.0)
+local function px(n) return math.round(n*SCALE) end
+
+-- ─── Storage ──────────────────────────────────────────────────────────
+local function jRead(f)
+    if not(isfile and isfile(f)) then return {} end
+    local ok,r = pcall(readfile,f)
+    if not ok or not r or r=="" then return {} end
+    local ok2,t = pcall(HttpService.JSONDecode,HttpService,r)
+    return (ok2 and type(t)=="table") and t or {}
+end
+local function jWrite(f,d)
+    pcall(function() writefile(f,HttpService:JSONEncode(d)) end)
+end
+
+-- ─── State ────────────────────────────────────────────────────────────
+local S = {
+    cache=jRead(F_CACHE), equipped=jRead(F_EQUIPPED),
+    presets=jRead(F_PRESETS), bookmarks=jRead(F_BOOKMARKS),
+    rCache={},
+    tab="Animations", searchList={}, catCursor=nil,
+    page=1, perPage=8,
+    bundleId=nil, bundleName="None", bundleItems={},
+    selSlot="idleanimation", masterTrack=nil, masterGen=0,
+    renameIdx=nil, gridThreads={},
+    notifQueue={}, notifBusy=false,
+}
+if type(S.presets)~="table"   then S.presets={}   end
+if type(S.equipped)~="table"  then S.equipped={}  end
+if type(S.bookmarks)~="table" then S.bookmarks={} end
+
+-- Online cache sync
+task.spawn(function()
+    local ok,raw = pcall(game.HttpGet,game,CACHE_URL)
+    if not ok or not raw then return end
+    local ok2,online = pcall(HttpService.JSONDecode,HttpService,raw)
+    if not ok2 or type(online)~="table" then return end
+    local changed=false
+    for k,v in pairs(online) do
+        if not S.cache[k] then S.cache[k]=v; changed=true end
+    end
+    if changed then jWrite(F_CACHE,S.cache) end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  ANIMATION ENGINE
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function fetchAnims(assetId, assetType)
+    local sid = tostring(assetId)
+    if S.rCache[sid] then return S.rCache[sid] end
+    if S.cache[sid] then
+        local list={}
+        for _,d in ipairs(S.cache[sid]) do
+            local a=Instance.new("Animation")
+            a.Name,a.AnimationId=d.Name,d.AnimationId
+            table.insert(list,a)
+        end
+        S.rCache[sid]=list; return list
+    end
+    local lower=string.lower(assetType or "")
+    local prop="IdleAnimation"
+    if lower:find("walk") then prop="WalkAnimation"
+    elseif lower:find("run") then prop="RunAnimation"
+    elseif lower:find("jump") then prop="JumpAnimation"
+    elseif lower:find("fall") then prop="FallAnimation"
+    elseif lower:find("climb") then prop="ClimbAnimation"
+    elseif lower:find("swim") then prop="SwimAnimation"
+    end
+    local result,serial={},{}
+    pcall(function()
+        local desc=Instance.new("HumanoidDescription")
+        desc[prop]=tonumber(assetId)
+        local dummy=Players:CreateHumanoidModelFromDescription(desc,Enum.HumanoidRigType.R15)
+        local ani=dummy:FindFirstChild("Animate")
+        if ani then
+            local folders=(prop=="SwimAnimation") and {"swim","swimidle"}
+                or {string.lower(prop:gsub("Animation",""))}
+            for _,fn in ipairs(folders) do
+                local folder=ani:FindFirstChild(fn)
+                if folder then
+                    for _,child in ipairs(folder:GetChildren()) do
+                        if child:IsA("Animation") and child.AnimationId~="" then
+                            local c2=child:Clone()
+                            table.insert(result,c2)
+                            table.insert(serial,{Name=c2.Name,AnimationId=c2.AnimationId})
+                        end
+                    end
+                end
+            end
+        end
+        dummy:Destroy()
+    end)
+    if #result==0 then
+        pcall(function()
+            local objs=game:GetObjects("rbxassetid://"..sid)
+            if objs and #objs>0 then
+                local function tryAdd(item)
+                    if item:IsA("Animation") then
+                        table.insert(result,item:Clone())
+                        table.insert(serial,{Name=item.Name,AnimationId=item.AnimationId})
+                    end
+                end
+                tryAdd(objs[1])
+                for _,d in ipairs(objs[1]:GetDescendants()) do tryAdd(d) end
+            end
+        end)
+    end
+    S.rCache[sid]=result; S.cache[sid]=serial
+    jWrite(F_CACHE,S.cache)
+    return result
+end
+
+local function clearCache(id)
+    local sid=tostring(id)
+    S.rCache[sid]=nil; S.cache[sid]=nil
+    jWrite(F_CACHE,S.cache)
+end
+
+local function pickTrack(tracks,slotType)
+    if #tracks==0 then return nil end
+    local lt=string.lower(slotType or "")
+    if lt=="swimidleanimation" then
+        for _,t in ipairs(tracks) do
+            if string.lower(t.Name):find("idle") then return t end
+        end
+        return tracks[2] or tracks[1]
+    end
+    return tracks[1]
+end
+
+local function applySlot(char,slotType,animList)
+    local animate=char:FindFirstChild("Animate")
+    local human=char:FindFirstChildOfClass("Humanoid")
+    if not animate or not human then return end
+    for _,tr in ipairs(human:GetPlayingAnimationTracks()) do
+        pcall(function() tr:AdjustWeight(0,0); tr:Stop(0) end)
+    end
+    animate.Disabled=true
+    local fn=SLOT_TO_FOLDER[string.lower(slotType)]
+    if fn then
+        local folder=animate:FindFirstChild(fn)
+        if folder then
+            for _,c2 in ipairs(folder:GetChildren()) do
+                if c2:IsA("Animation") then c2:Destroy() end
+            end
+            S.equipped[string.lower(slotType)]={}
+            for _,anim in ipairs(animList) do
+                local na=Instance.new("Animation",folder)
+                na.Name,na.AnimationId=anim.Name,anim.AnimationId
+                table.insert(S.equipped[string.lower(slotType)],
+                    {Name=anim.Name,AnimationId=anim.AnimationId})
+            end
+            jWrite(F_EQUIPPED,S.equipped)
+        end
+    end
+    task.wait(0.05); animate.Disabled=false
+end
+
+local function applyAllEquipped(char)
+    if not char then return end
+    local animate=char:WaitForChild("Animate",6)
+    local human=char:WaitForChild("Humanoid",6)
+    if not animate or not human then return end
+    local idle=animate:FindFirstChild("idle")
+    if idle then idle:WaitForChild("Animation1",4) end
+    task.wait(0.15)
+    for _,tr in ipairs(human:GetPlayingAnimationTracks()) do
+        pcall(function() tr:AdjustWeight(0,0); tr:Stop(0) end)
+    end
+    animate.Disabled=true
+    for slotType,animDataList in pairs(S.equipped) do
+        local fn=SLOT_TO_FOLDER[slotType]
+        if fn then
+            local folder=animate:FindFirstChild(fn)
+            if folder then
+                for _,c2 in ipairs(folder:GetChildren()) do
+                    if c2:IsA("Animation") then c2:Destroy() end
+                end
+                for _,d in ipairs(animDataList) do
+                    local na=Instance.new("Animation",folder)
+                    na.Name,na.AnimationId=d.Name,d.AnimationId
+                end
+            end
+        end
+    end
+    task.wait(0.05); animate.Disabled=false
+end
+
+local function onCharAdded(char)
+    task.spawn(function()
+        if next(S.equipped) then applyAllEquipped(char) end
+    end)
+end
+if LP.Character then task.spawn(onCharAdded,LP.Character) end
+LP.CharacterAdded:Connect(onCharAdded)
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  UI ENGINE
+-- ═══════════════════════════════════════════════════════════════════════
+
+local guiParent=(typeof(gethui)=="function" and gethui()) or game:GetService("CoreGui")
+if guiParent:FindFirstChild("FUA3") then guiParent.FUA3:Destroy() end
+
+local Screen=Instance.new("ScreenGui",guiParent)
+Screen.Name="FUA3"; Screen.ResetOnSpawn=false
+Screen.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+Screen.DisplayOrder=999
+
+-- ── Primitives ────────────────────────────────────────────────────────
+local function mkCorner(p,r)
+    local c2=Instance.new("UICorner",p)
+    c2.CornerRadius=UDim.new(0,r or px(8)); return c2
+end
+local function mkStroke(p,col,thick,trans)
+    local s=Instance.new("UIStroke",p)
+    s.Color=col or C.stroke; s.Thickness=thick or 1
+    s.Transparency=trans or 0; return s
+end
+local function mkPad(p,t,b,l,r)
+    local u=Instance.new("UIPadding",p)
+    u.PaddingTop=UDim.new(0,t or 0); u.PaddingBottom=UDim.new(0,b or 0)
+    u.PaddingLeft=UDim.new(0,l or 0); u.PaddingRight=UDim.new(0,r or 0)
+end
+local function tw(obj,t2,goals,style,dir)
+    return TweenService:Create(obj,
+        TweenInfo.new(t2,style or Enum.EasingStyle.Quint,
+            dir or Enum.EasingDirection.Out),goals)
+end
+local function trunc(s2,n) return (#s2>n) and (s2:sub(1,n-1).."…") or s2 end
+
+-- Neon glow effect
+local function mkGlow(parent,color,size)
+    local g=Instance.new("ImageLabel",parent)
+    g.Size=UDim2.new(1,size or px(20),1,size or px(20))
+    g.Position=UDim2.new(0,-(size or px(10))/2,0,-(size or px(10))/2)
+    g.BackgroundTransparency=1
+    g.Image="rbxassetid://7072725342"
+    g.ImageColor3=color or C.neon
+    g.ImageTransparency=0.7
+    g.ZIndex=parent.ZIndex-1
+    return g
+end
+
+-- Animated gradient
+local function mkAnimGrad(parent,c0,c1,speed)
+    local g=Instance.new("UIGradient",parent)
+    g.Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,c0),
+        ColorSequenceKeypoint.new(0.5,c1),
+        ColorSequenceKeypoint.new(1,c0),
+    })
+    g.Rotation=45; g.Offset=Vector2.new(-1,0)
+    TweenService:Create(g,TweenInfo.new(speed or 2,
+        Enum.EasingStyle.Linear,Enum.EasingDirection.InOut,-1),
+        {Offset=Vector2.new(1,0)}):Play()
+    return g
+end
+
+local function shimmer(f,cA,cB)
+    local old=f:FindFirstChild("_shim"); if old then old:Destroy() end
+    local g=mkAnimGrad(f,cA,cB,1.6); g.Name="_shim"; return g
+end
+local function noShimmer(f)
+    local g=f:FindFirstChild("_shim"); if g then g:Destroy() end
+end
+
+-- Hover
+local function hover(btn,norm,hi)
+    btn.MouseEnter:Connect(function() tw(btn,0.15,{BackgroundColor3=hi}):Play() end)
+    btn.MouseLeave:Connect(function() tw(btn,0.15,{BackgroundColor3=norm}):Play() end)
+end
+
+-- ── Dimensions ────────────────────────────────────────────────────────
+local WIN_W   = px(760)
+local WIN_H   = px(510)
+local TITLE_H = px(52)
+local LEFT_W  = px(310)
+local RIGHT_W = WIN_W - LEFT_W - px(12)
+local VP_H    = px(185)
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  MAIN WINDOW
+-- ═══════════════════════════════════════════════════════════════════════
+
+local Win=Instance.new("Frame",Screen)
+Win.Name="Win"
+Win.Size=UDim2.fromOffset(WIN_W,WIN_H)
+Win.Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2)
+Win.BackgroundColor3=C.bg1
+Win.BorderSizePixel=0
+Win.ClipsDescendants=true
+mkCorner(Win,px(16))
+
+-- Multi-layer glass background
+local bgLayer1=Instance.new("Frame",Win)
+bgLayer1.Size=UDim2.new(1,0,1,0)
+bgLayer1.BackgroundColor3=C.bg0
+bgLayer1.BackgroundTransparency=0
+bgLayer1.BorderSizePixel=0
+
+local bgGrad=Instance.new("UIGradient",bgLayer1)
+bgGrad.Color=ColorSequence.new({
+    ColorSequenceKeypoint.new(0,Color3.fromRGB(14,18,35)),
+    ColorSequenceKeypoint.new(0.5,Color3.fromRGB(8,10,20)),
+    ColorSequenceKeypoint.new(1,Color3.fromRGB(16,20,40)),
+})
+bgGrad.Rotation=135
+
+-- Neon border stroke
+local winStroke=mkStroke(Win,C.neon,2,0.3)
+
+-- Animated neon border
+task.spawn(function()
+    local colors={C.neon,C.neon2,C.neonG,C.neonP,C.neon}
+    local idx=1
+    while Win and Win.Parent do
+        local next_idx=(idx%#colors)+1
+        tw(winStroke,2,{Color=colors[next_idx]}):Play()
+        idx=next_idx; task.wait(2)
+    end
+end)
+
+-- ── Title Bar ─────────────────────────────────────────────────────────
+local TBar=Instance.new("Frame",Win)
+TBar.Name="TBar"; TBar.Size=UDim2.new(1,0,0,TITLE_H)
+TBar.BackgroundColor3=C.bg2; TBar.BorderSizePixel=0
+mkCorner(TBar,px(16))
+
+local TBarFix=Instance.new("Frame",TBar)
+TBarFix.Size=UDim2.new(1,0,0.5,0); TBarFix.Position=UDim2.new(0,0,0.5,0)
+TBarFix.BackgroundColor3=C.bg2; TBarFix.BorderSizePixel=0
+
+-- Title gradient line
+local titleLine=Instance.new("Frame",TBar)
+titleLine.Size=UDim2.new(1,0,0,px(2))
+titleLine.Position=UDim2.new(0,0,1,-px(2))
+titleLine.BackgroundColor3=C.neon; titleLine.BorderSizePixel=0
+mkAnimGrad(titleLine,C.neon,C.neon2,3)
+
+-- Logo
+local LogoFrame=Instance.new("Frame",TBar)
+LogoFrame.Size=UDim2.fromOffset(px(34),px(34))
+LogoFrame.Position=UDim2.fromOffset(px(12),px(9))
+LogoFrame.BackgroundColor3=C.neon; LogoFrame.BorderSizePixel=0
+mkCorner(LogoFrame,px(10))
+mkAnimGrad(LogoFrame,C.neon,C.neon2,2)
+
+local LogoLbl=Instance.new("TextLabel",LogoFrame)
+LogoLbl.Size=UDim2.new(1,0,1,0); LogoLbl.BackgroundTransparency=1
+LogoLbl.Text="▶"; LogoLbl.TextColor3=C.white
+LogoLbl.Font=Enum.Font.GothamBlack; LogoLbl.TextSize=px(14)
+
+-- Title text with gradient
+local TitleLbl=Instance.new("TextLabel",TBar)
+TitleLbl.Size=UDim2.new(1,-px(160),0,px(26))
+TitleLbl.Position=UDim2.fromOffset(px(54),px(6))
+TitleLbl.BackgroundTransparency=1
+TitleLbl.Text="Fe UGC Animations"
+TitleLbl.TextColor3=C.textHi
+TitleLbl.Font=Enum.Font.GothamBlack
+TitleLbl.TextSize=px(16)
+TitleLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local SubLbl=Instance.new("TextLabel",TBar)
+SubLbl.Size=UDim2.new(0.5,0,0,px(14))
+SubLbl.Position=UDim2.fromOffset(px(54),px(32))
+SubLbl.BackgroundTransparency=1
+SubLbl.Text="Ultra Edition v3.0  •  Auto-Sync"
+SubLbl.TextColor3=C.neon; SubLbl.Font=Enum.Font.Gotham; SubLbl.TextSize=px(9)
+SubLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+-- Window controls
+local function mkWCtrl(sym,xOff,bg,hiBg)
+    local b=Instance.new("TextButton",TBar)
+    b.Size=UDim2.fromOffset(px(24),px(24))
+    b.Position=UDim2.new(1,xOff,0.5,-px(12))
+    b.BackgroundColor3=bg; b.Text=sym; b.TextColor3=C.white
+    b.Font=Enum.Font.GothamBold; b.TextSize=px(12)
+    b.AutoButtonColor=false; mkCorner(b,px(12))
+    hover(b,bg,hiBg); return b
+end
+local BtnClose=mkWCtrl("✕",-px(12),C.neonR,Color3.fromRGB(200,40,60))
+local BtnMin=mkWCtrl("─",-px(42),C.bg4,C.cardHi)
+
+-- ── Drag ──────────────────────────────────────────────────────────────
+do
+    local drag,dS,wS=false,nil,nil
+    TBar.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            drag=true; dS=i.Position; wS=Win.Position
+        end
+    end)
+    UserInput.InputChanged:Connect(function(i)
+        if drag and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local d=i.Position-dS
+            Win.Position=UDim2.fromOffset(wS.X.Offset+d.X,wS.Y.Offset+d.Y)
+        end
+    end)
+    UserInput.InputEnded:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=false end
+    end)
+end
+
+-- ── Mini button ───────────────────────────────────────────────────────
+local MiniBtn=Instance.new("Frame",Screen)
+MiniBtn.Size=UDim2.fromOffset(px(70),px(70))
+MiniBtn.Position=UDim2.new(1,-px(84),1,-px(84))
+MiniBtn.BackgroundColor3=C.bg2
+MiniBtn.Visible=false; MiniBtn.BorderSizePixel=0
+mkCorner(MiniBtn,px(20))
+mkStroke(MiniBtn,C.neon,2)
+mkAnimGrad(MiniBtn,C.bg2,C.bg3,3)
+
+local MiniBtnGlow=Instance.new("ImageLabel",MiniBtn)
+MiniBtnGlow.Size=UDim2.new(1,px(20),1,px(20))
+MiniBtnGlow.Position=UDim2.new(0,-px(10),0,-px(10))
+MiniBtnGlow.BackgroundTransparency=1
+MiniBtnGlow.Image="rbxassetid://7072725342"
+MiniBtnGlow.ImageColor3=C.neon; MiniBtnGlow.ImageTransparency=0.5
+
+local MiniBtnLbl=Instance.new("TextLabel",MiniBtn)
+MiniBtnLbl.Size=UDim2.new(1,0,1,0); MiniBtnLbl.BackgroundTransparency=1
+MiniBtnLbl.Text="UGC"; MiniBtnLbl.TextColor3=C.neon
+MiniBtnLbl.Font=Enum.Font.GothamBlack; MiniBtnLbl.TextSize=px(13)
+
+local MiniBtnHit=Instance.new("TextButton",MiniBtn)
+MiniBtnHit.Size=UDim2.new(1,0,1,0); MiniBtnHit.BackgroundTransparency=1
+MiniBtnHit.Text=""; MiniBtnHit.Draggable=true
+
+BtnClose.MouseButton1Click:Connect(function()
+    tw(Win,0.25,{Size=UDim2.fromOffset(0,0),
+        Position=UDim2.new(0.5,0,0.5,0)},
+        Enum.EasingStyle.Back,Enum.EasingDirection.In):Play()
+    task.wait(0.27); Win.Visible=false; MiniBtn.Visible=true
+end)
+BtnMin.MouseButton1Click:Connect(function()
+    Win.Visible=false; MiniBtn.Visible=true
+end)
+MiniBtnHit.MouseButton1Click:Connect(function()
+    MiniBtn.Visible=false; Win.Visible=true
+    Win.Size=UDim2.fromOffset(0,0)
+    Win.Position=UDim2.new(0.5,0,0.5,0)
+    tw(Win,0.4,{Size=UDim2.fromOffset(WIN_W,WIN_H),
+        Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2)},
+        Enum.EasingStyle.Back):Play()
+end)
+
+-- ── Body ──────────────────────────────────────────────────────────────
+local Body=Instance.new("Frame",Win)
+Body.Size=UDim2.new(1,-px(16),1,-(TITLE_H+px(8)))
+Body.Position=UDim2.fromOffset(px(8),TITLE_H+px(6))
+Body.BackgroundTransparency=1
+
+local LCol=Instance.new("Frame",Body)
+LCol.Size=UDim2.new(0,LEFT_W,1,0); LCol.BackgroundTransparency=1
+
+local Div=Instance.new("Frame",Body)
+Div.Size=UDim2.new(0,px(1),1,-px(4))
+Div.Position=UDim2.fromOffset(LEFT_W+px(4),px(2))
+Div.BackgroundColor3=C.strokeHi; Div.BackgroundTransparency=0.6
+Div.BorderSizePixel=0
+
+local RCol=Instance.new("Frame",Body)
+RCol.Size=UDim2.new(0,RIGHT_W-px(8),1,0)
+RCol.Position=UDim2.fromOffset(LEFT_W+px(10),0)
+RCol.BackgroundTransparency=1
+
+-- ── Tab Bar ───────────────────────────────────────────────────────────
+local TABS={"Animations","My Sets","Current"}
+local tabBtns={}
+
+local TabBar=Instance.new("Frame",LCol)
+TabBar.Size=UDim2.new(1,0,0,px(32))
+TabBar.BackgroundColor3=C.bg2
+TabBar.BorderSizePixel=0; mkCorner(TabBar,px(10))
+mkStroke(TabBar,C.stroke,1,0.5)
+
+local tabGrid=Instance.new("UIGridLayout",TabBar)
+tabGrid.CellSize=UDim2.new(1/#TABS,-px(4),1,-px(6))
+tabGrid.CellPadding=UDim2.fromOffset(px(3),0)
+tabGrid.HorizontalAlignment=Enum.HorizontalAlignment.Center
+tabGrid.VerticalAlignment=Enum.VerticalAlignment.Center
+
+for _,name in ipairs(TABS) do
+    local tb=Instance.new("TextButton",TabBar)
+    tb.BackgroundColor3=C.bg2; tb.TextColor3=C.textLo
+    tb.Text=name; tb.Font=Enum.Font.GothamBold; tb.TextSize=px(10)
+    tb.AutoButtonColor=false; tb.ClipsDescendants=true
+    mkCorner(tb,px(7)); tabBtns[name]=tb
+end
+
+local activeTabGlow=nil
+local function setTab(name)
+    S.tab=name
+    for n,tb in pairs(tabBtns) do
+        local isActive=(n==name)
+        tw(tb,0.2,{
+            BackgroundColor3=isActive and C.neon or C.bg2,
+            TextColor3=isActive and C.white or C.textLo,
+        }):Play()
+    end
+end
+setTab("Animations")
+
+-- ── Search ────────────────────────────────────────────────────────────
+local SRow=Instance.new("Frame",LCol)
+SRow.Size=UDim2.new(1,0,0,px(30)); SRow.Position=UDim2.fromOffset(0,px(38))
+SRow.BackgroundTransparency=1
+
+local SBox=Instance.new("TextBox",SRow)
+SBox.Size=UDim2.new(1,-px(64),1,0)
+SBox.BackgroundColor3=C.bg3; SBox.TextColor3=C.textHi
+SBox.PlaceholderText="🔍  Search animations…"; SBox.PlaceholderColor3=C.textLo
+SBox.Text=""; SBox.Font=Enum.Font.Gotham; SBox.TextSize=px(11)
+SBox.ClipsDescendants=true
+mkCorner(SBox,px(8)); mkStroke(SBox,C.strokeHi,1,0.5)
+mkPad(SBox,0,0,px(10),0)
+
+local SBtn=Instance.new("TextButton",SRow)
+SBtn.Size=UDim2.fromOffset(px(58),px(30))
+SBtn.Position=UDim2.new(1,-px(58),0,0)
+SBtn.BackgroundColor3=C.neon; SBtn.TextColor3=C.white
+SBtn.Text="Search"; SBtn.Font=Enum.Font.GothamBold; SBtn.TextSize=px(10)
+SBtn.AutoButtonColor=false; SBtn.ClipsDescendants=true
+mkCorner(SBtn,px(8)); mkAnimGrad(SBtn,C.neon,C.neon2,3)
+hover(SBtn,C.neon,C.neon2)
+
+-- ── Scrollers ─────────────────────────────────────────────────────────
+local SCROLL_TOP=px(74)
+local SCROLL_H=WIN_H-TITLE_H-px(8)-SCROLL_TOP-px(32)
+
+local function mkScroller(parent,vis)
+    local sf=Instance.new("ScrollingFrame",parent)
+    sf.Size=UDim2.new(1,0,0,SCROLL_H)
+    sf.Position=UDim2.fromOffset(0,SCROLL_TOP)
+    sf.BackgroundColor3=C.bg2; sf.BackgroundTransparency=0.4
+    sf.BorderSizePixel=0; sf.ScrollBarThickness=px(3)
+    sf.ScrollBarImageColor3=C.neon
+    sf.CanvasSize=UDim2.new(0,0,0,0); sf.Visible=vis or false
+    mkCorner(sf,px(10)); mkStroke(sf,C.stroke,1,0.6)
+    return sf
+end
+
+local AnimScroll=mkScroller(LCol,true)
+local AnimList=Instance.new("UIListLayout",AnimScroll)
+AnimList.SortOrder=Enum.SortOrder.LayoutOrder
+AnimList.Padding=UDim.new(0,px(4)); mkPad(AnimScroll,px(4),px(4),px(4),px(4))
+
+local SetsScroll=mkScroller(LCol,false)
+local SetsList=Instance.new("UIListLayout",SetsScroll)
+SetsList.SortOrder=Enum.SortOrder.LayoutOrder
+SetsList.Padding=UDim.new(0,px(4)); mkPad(SetsScroll,px(4),px(4),px(4),px(4))
+
+local CurScroll=mkScroller(LCol,false)
+local CurList=Instance.new("UIListLayout",CurScroll)
+CurList.SortOrder=Enum.SortOrder.LayoutOrder
+CurList.Padding=UDim.new(0,px(4)); mkPad(CurScroll,px(4),px(4),px(4),px(4))
+
+-- Loading overlay
+local LoadFrame=Instance.new("Frame",LCol)
+LoadFrame.Size=UDim2.new(1,0,0,SCROLL_H)
+LoadFrame.Position=UDim2.fromOffset(0,SCROLL_TOP)
+LoadFrame.BackgroundColor3=C.bg1
+LoadFrame.BackgroundTransparency=0.15
+LoadFrame.ZIndex=12; LoadFrame.Visible=false
+mkCorner(LoadFrame,px(10))
+
+local LoadLbl=Instance.new("TextLabel",LoadFrame)
+LoadLbl.Size=UDim2.new(1,0,1,0); LoadLbl.BackgroundTransparency=1
+LoadLbl.Text="Loading…"; LoadLbl.TextColor3=C.neon
+LoadLbl.Font=Enum.Font.GothamBold; LoadLbl.TextSize=px(14)
+LoadLbl.ZIndex=13; shimmer(LoadLbl,C.neon,C.neon2)
+
+-- Pagination
+local PageBar=Instance.new("Frame",LCol)
+PageBar.Size=UDim2.new(1,0,0,px(28))
+PageBar.Position=UDim2.new(0,0,1,-px(28))
+PageBar.BackgroundTransparency=1
+
+local function mkPgBtn(txt,xOff)
+    local b=Instance.new("TextButton",PageBar)
+    b.Size=UDim2.fromOffset(px(54),px(26)); b.Position=UDim2.fromOffset(xOff,0)
+    b.BackgroundColor3=C.bg3; b.TextColor3=C.textMid
+    b.Text=txt; b.Font=Enum.Font.GothamBold; b.TextSize=px(10)
+    b.AutoButtonColor=false; b.ClipsDescendants=true
+    mkCorner(b,px(7)); mkStroke(b,C.stroke,1,0.5)
+    hover(b,C.bg3,C.bg4); return b
+end
+local PrevBtn=mkPgBtn("◄ Back",0)
+local PageLbl=Instance.new("TextLabel",PageBar)
+PageLbl.Size=UDim2.new(1,-px(116),1,0); PageLbl.Position=UDim2.fromOffset(px(58),0)
+PageLbl.BackgroundTransparency=1; PageLbl.Text="Page 1"
+PageLbl.TextColor3=C.textLo; PageLbl.Font=Enum.Font.Gotham; PageLbl.TextSize=px(10)
+local NextBtn=mkPgBtn("Next ►",LEFT_W-px(56))
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  RIGHT PANEL
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Viewport with glass frame
+local VPFrame=Instance.new("Frame",RCol)
+VPFrame.Size=UDim2.new(1,0,0,VP_H+px(4))
+VPFrame.BackgroundColor3=C.bg3; VPFrame.BorderSizePixel=0
+mkCorner(VPFrame,px(12)); mkStroke(VPFrame,C.neon,2,0.4)
+
+local VP=Instance.new("ViewportFrame",VPFrame)
+VP.Size=UDim2.new(1,-px(4),1,-px(4))
+VP.Position=UDim2.fromOffset(px(2),px(2))
+VP.BackgroundColor3=C.overlay
+VP.BackgroundTransparency=0; mkCorner(VP,px(10))
+
+-- VP overlay corner badges
+local vpBadge=Instance.new("TextLabel",VPFrame)
+vpBadge.Size=UDim2.fromOffset(px(60),px(18))
+vpBadge.Position=UDim2.fromOffset(px(6),px(6))
+vpBadge.BackgroundColor3=C.bg0; vpBadge.BackgroundTransparency=0.3
+vpBadge.Text="PREVIEW"; vpBadge.TextColor3=C.neon
+vpBadge.Font=Enum.Font.GothamBold; vpBadge.TextSize=px(8)
+vpBadge.ZIndex=5; mkCorner(vpBadge,px(4))
+
+-- Status
+local StatFrame=Instance.new("Frame",RCol)
+StatFrame.Size=UDim2.new(1,0,0,px(26))
+StatFrame.Position=UDim2.fromOffset(0,VP_H+px(10))
+StatFrame.BackgroundColor3=C.bg3; StatFrame.BorderSizePixel=0
+mkCorner(StatFrame,px(7)); mkStroke(StatFrame,C.stroke,1,0.5)
+
+local StatLbl=Instance.new("TextLabel",StatFrame)
+StatLbl.Size=UDim2.new(1,-px(12),1,0); StatLbl.Position=UDim2.fromOffset(px(8),0)
+StatLbl.BackgroundTransparency=1; StatLbl.Text="Select a bundle to preview"
+StatLbl.TextColor3=C.textLo; StatLbl.Font=Enum.Font.GothamSemibold
+StatLbl.TextSize=px(10); StatLbl.TextXAlignment=Enum.TextXAlignment.Left
+StatLbl.ClipsDescendants=true
+
+-- Slot grid (2×4)
+local SlotFrame=Instance.new("Frame",RCol)
+SlotFrame.Size=UDim2.new(1,0,0,px(58))
+SlotFrame.Position=UDim2.fromOffset(0,VP_H+px(42))
+SlotFrame.BackgroundTransparency=1
+
+local slotGrid=Instance.new("UIGridLayout",SlotFrame)
+slotGrid.CellSize=UDim2.new(0.25,-px(3),0.5,-px(3))
+slotGrid.CellPadding=UDim2.fromOffset(px(3),px(3))
+
+local slotBtns={}
+for _,slot in ipairs(SLOT_ORDER) do
+    local b=Instance.new("TextButton",SlotFrame)
+    b.BackgroundColor3=C.bg3; b.TextColor3=C.textLo
+    b.Text=(SLOT_ICONS[slot] or "").."\n"..SLOT_LABELS[slot]
+    b.Font=Enum.Font.GothamBold; b.TextSize=px(8)
+    b.AutoButtonColor=false; b.ClipsDescendants=true
+    b.TextScaled=false
+    mkCorner(b,px(6)); mkStroke(b,C.stroke,1,0.5)
+    slotBtns[slot]=b
+end
+
+-- Action buttons
+local ActFrame=Instance.new("Frame",RCol)
+ActFrame.Size=UDim2.new(1,0,0,px(98))
+ActFrame.Position=UDim2.new(0,0,1,-px(98))
+ActFrame.BackgroundTransparency=1
+
+local function mkActBtn(text,bg,yOff,wScale,xOff,gradC)
+    local b=Instance.new("TextButton",ActFrame)
+    b.Size=UDim2.new(wScale or 1,(wScale and wScale<1) and -px(2) or 0,0,px(28))
+    b.Position=UDim2.fromOffset(xOff or 0,yOff or 0)
+    b.BackgroundColor3=bg; b.TextColor3=C.white
+    b.Text=text; b.Font=Enum.Font.GothamBold; b.TextSize=px(10)
+    b.AutoButtonColor=false; b.ClipsDescendants=true
+    mkCorner(b,px(8))
+    if gradC then mkAnimGrad(b,bg,gradC,2.5) end
+    return b
+end
+
+local halfR=math.floor(RIGHT_W*0.5)-px(8)
+
+local WearSelBtn  = mkActBtn("▶  Wear Selected", C.neon,  0,    1,   0,   C.neon2)
+local WearAllBtn  = mkActBtn("▶▶ Wear All Slots",C.neonG, px(32),1,  0,   Color3.fromRGB(40,180,120))
+local BookmarkBtn = mkActBtn("☆  Save Bundle",   C.bg4,   px(66),0.5,0)
+local SaveSetBtn  = mkActBtn("＋ Save as Set",    C.neonP, px(66),0.5,halfR+px(4),Color3.fromRGB(160,50,220))
+
+WearSelBtn.Visible,WearAllBtn.Visible=false,false
+BookmarkBtn.Visible,SaveSetBtn.Visible=false,false
+hover(BookmarkBtn,C.bg4,C.cardHi)
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  NOTIFICATION SYSTEM
+-- ═══════════════════════════════════════════════════════════════════════
+
+local NotifStack=Instance.new("Frame",Screen)
+NotifStack.Size=UDim2.new(0,px(280),1,0)
+NotifStack.Position=UDim2.new(1,-px(290),0,0)
+NotifStack.BackgroundTransparency=1; NotifStack.BorderSizePixel=0
+
+local NotifLayout=Instance.new("UIListLayout",NotifStack)
+NotifLayout.SortOrder=Enum.SortOrder.LayoutOrder
+NotifLayout.Padding=UDim.new(0,px(6))
+NotifLayout.VerticalAlignment=Enum.VerticalAlignment.Bottom
+NotifLayout.FillDirection=Enum.FillDirection.Vertical
+
+local notifCount=0
+
+local function showNotif(text,icon,color,duration)
+    icon=icon or "ℹ"; color=color or C.neon; duration=duration or 3
+    notifCount=notifCount+1
+
+    local nf=Instance.new("Frame",NotifStack)
+    nf.Size=UDim2.fromOffset(px(270),px(44))
+    nf.BackgroundColor3=C.bg2; nf.BorderSizePixel=0
+    nf.LayoutOrder=notifCount; nf.BackgroundTransparency=1
+    mkCorner(nf,px(10)); mkStroke(nf,color,2,0.2)
+
+    local iconLbl=Instance.new("TextLabel",nf)
+    iconLbl.Size=UDim2.fromOffset(px(36),px(44))
+    iconLbl.BackgroundColor3=color; iconLbl.BackgroundTransparency=0.7
+    iconLbl.Text=icon; iconLbl.TextColor3=color
+    iconLbl.Font=Enum.Font.GothamBlack; iconLbl.TextSize=px(16)
+    mkCorner(iconLbl,px(10))
+
+    local msgLbl=Instance.new("TextLabel",nf)
+    msgLbl.Size=UDim2.new(1,-px(46),1,0); msgLbl.Position=UDim2.fromOffset(px(42),0)
+    msgLbl.BackgroundTransparency=1; msgLbl.Text=text
+    msgLbl.TextColor3=C.textHi; msgLbl.Font=Enum.Font.GothamSemibold
+    msgLbl.TextSize=px(10); msgLbl.TextXAlignment=Enum.TextXAlignment.Left
+    msgLbl.TextWrapped=true; msgLbl.ClipsDescendants=true
+
+    -- Slide in
+    nf.Position=UDim2.fromOffset(px(280),0)
+    tw(nf,0.3,{BackgroundTransparency=0,Position=UDim2.fromOffset(0,0)},
+        Enum.EasingStyle.Back):Play()
+
+    -- Progress bar
+    local prog=Instance.new("Frame",nf)
+    prog.Size=UDim2.new(1,0,0,px(2))
+    prog.Position=UDim2.new(0,0,1,-px(2))
+    prog.BackgroundColor3=color; prog.BorderSizePixel=0
+    mkCorner(prog,px(1))
+    tw(prog,duration,{Size=UDim2.new(0,0,0,px(2))},Enum.EasingStyle.Linear):Play()
+
+    task.delay(duration,function()
+        tw(nf,0.25,{BackgroundTransparency=1,
+            Position=UDim2.fromOffset(px(280),0)}):Play()
+        task.wait(0.28); nf:Destroy()
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  VIEWPORT SKELETON
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function buildSkeleton(vpFrame)
+    local wm=vpFrame:FindFirstChildOfClass("WorldModel")
+    if not wm then wm=Instance.new("WorldModel",vpFrame)
+    else wm:ClearAllChildren() end
+    local char=LP.Character or LP.CharacterAdded:Wait()
+    char.Archivable=true
+    local clone=char:Clone(); clone.Parent=wm
+    local root=clone:WaitForChild("HumanoidRootPart",5)
+    local human=clone:FindFirstChildOfClass("Humanoid")
+    if not human then return nil,nil,nil end
+    local animator=human:FindFirstChildOfClass("Animator")
+        or Instance.new("Animator",human)
+    if clone:FindFirstChild("Animate") then clone.Animate.Disabled=true end
+    local cam=Instance.new("Camera",vpFrame); vpFrame.CurrentCamera=cam
+    cam.CFrame=CFrame.new(Vector3.new(0,2,5.8),Vector3.new(0,1,0))
+    local angle=0
+    local conn=RunService.RenderStepped:Connect(function(dt)
+        if clone and clone.Parent and root then
+            angle=angle+math.rad(24*dt)
+            clone:PivotTo(CFrame.new(0,0,0)*CFrame.Angles(0,angle,0))
+        end
+    end)
+    return clone,animator,conn
+end
+
+local function safePT(animator,track,looped)
+    local ok,tr=pcall(function()
+        local t=animator:LoadAnimation(track)
+        t.Looped=looped; t:Play(); return t
+    end)
+    if not ok or not tr then return false,nil end
+    task.wait(0.18)
+    if not tr.IsPlaying then pcall(function() tr:Stop() end); return false,nil end
+    return true,tr
+end
+
+local function renderPreview(payload,slotType)
+    if S.masterTrack then pcall(function() S.masterTrack:Stop() end); S.masterTrack=nil end
+    S.masterGen=S.masterGen+1
+    local myGen=S.masterGen
+    local lt=string.lower(slotType or "")
+    local label=SLOT_LABELS[lt] or lt
+    StatLbl.Text=trunc(S.bundleName,22).." • "..label.." ⟳"
+    shimmer(StatLbl,C.neon,C.neon2)
+    local dummy,animator=buildSkeleton(VP)
+    if not dummy then return end
+    task.spawn(function()
+        local tracks,track=nil,nil
+        local tries=0
+        while myGen==S.masterGen do
+            tracks=fetchAnims(payload.Id,payload.AssetType)
+            track=#tracks>0 and pickTrack(tracks,lt) or nil
+            if track then break end
+            tries=tries+1; clearCache(payload.Id)
+            task.wait(math.min(0.6+tries*0.4,3))
+        end
+        if myGen~=S.masterGen then return end
+        noShimmer(StatLbl)
+        StatLbl.Text=trunc(S.bundleName,22).." • "..label
+        local isIdle=(lt=="idleanimation")
+        if isIdle and tracks and #tracks>1 then
+            local ptr=1
+            while myGen==S.masterGen and dummy and dummy.Parent do
+                if S.masterTrack then S.masterTrack:Stop() end
+                local ok2,pt=safePT(animator,tracks[ptr],false)
+                if ok2 then S.masterTrack=pt; pt.Stopped:Wait() end
+                ptr=(ptr%#tracks)+1
+            end
+        elseif track then
+            local ok2,pt=safePT(animator,track,true)
+            while not ok2 and myGen==S.masterGen do
+                clearCache(payload.Id); task.wait(0.4)
+                local rl=fetchAnims(payload.Id,payload.AssetType)
+                track=#rl>0 and pickTrack(rl,lt) or nil
+                if track then ok2,pt=safePT(animator,track,true) end
+            end
+            if myGen==S.masterGen then S.masterTrack=pt end
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  BUNDLE INSPECTION
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function refreshBookmarkBtn()
+    if not S.bundleId then BookmarkBtn.Visible=false; return end
+    BookmarkBtn.Visible=true
+    local saved=S.bookmarks[tostring(S.bundleId)]~=nil
+    BookmarkBtn.Text=saved and "★  Saved" or "☆  Save Bundle"
+    BookmarkBtn.TextColor3=saved and C.gold or C.textHi
+    BookmarkBtn.BackgroundColor3=saved and Color3.fromRGB(60,50,10) or C.bg4
+end
+
+local function inspectBundle(bundleId,bundleName)
+    table.clear(S.bundleItems)
+    WearSelBtn.Visible,WearAllBtn.Visible=false,false
+    BookmarkBtn.Visible,SaveSetBtn.Visible=false,false
+    S.bundleId,S.bundleName=bundleId,bundleName or "Unknown"
+    StatLbl.Text=trunc(S.bundleName,22).." • Loading…"
+    shimmer(StatLbl,C.neon,C.neon2); refreshBookmarkBtn()
+    for _,b in pairs(slotBtns) do
+        b.BackgroundColor3=C.bg3; b.TextColor3=C.textLo
+        noShimmer(b)
+    end
+    task.spawn(function()
+        local ok,res=pcall(function() return AssetService:GetBundleDetailsAsync(bundleId) end)
+        if not ok or not res or not res.Items then
+            noShimmer(StatLbl); StatLbl.Text="Failed to load bundle"
+            showNotif("Failed to load bundle","✕",C.neonR); return
+        end
+        for _,item in ipairs(res.Items) do
+            local lt=string.lower(item.AssetType or "")
+            if lt=="swimanimation" then
+                S.bundleItems["swimanimation"]=item
+                S.bundleItems["swimidleanimation"]=item
+            elseif SLOT_LABELS[lt] then S.bundleItems[lt]=item end
+        end
+        WearAllBtn.Visible=true; BookmarkBtn.Visible=true
+        SaveSetBtn.Visible=true; refreshBookmarkBtn()
+        for slot,b in pairs(slotBtns) do
+            if S.bundleItems[slot] then
+                b.BackgroundColor3=C.bg4; b.TextColor3=C.neonG
+                mkStroke(b,C.neonG,1,0.3)
+            end
+        end
+        local play=S.bundleItems[S.selSlot] and S.selSlot or "idleanimation"
+        if S.bundleItems[play] then
+            slotBtns[play].BackgroundColor3=C.neon
+            slotBtns[play].TextColor3=C.white
+            WearSelBtn.Visible=true
+            renderPreview(S.bundleItems[play],play)
+        else
+            noShimmer(StatLbl)
+            StatLbl.Text=trunc(S.bundleName,22).." • No preview"
+        end
+    end)
+end
+
+for _,slot in ipairs(SLOT_ORDER) do
+    slotBtns[slot].MouseButton1Click:Connect(function()
+        S.selSlot=slot
+        local payload=S.bundleItems[slot]
+        if not payload then return end
+        WearSelBtn.Visible=true
+        renderPreview(payload,slot)
+        for s2,b2 in pairs(slotBtns) do
+            b2.BackgroundColor3=S.bundleItems[s2] and C.bg4 or C.bg3
+            b2.TextColor3=S.bundleItems[s2] and C.neonG or C.textLo
+            local st=b2:FindFirstChildOfClass("UIStroke")
+            if st then st:Destroy() end
+            if S.bundleItems[s2] then mkStroke(b2,C.neonG,1,0.3) end
+        end
+        slotBtns[slot].BackgroundColor3=C.neon
+        slotBtns[slot].TextColor3=C.white
+        local st2=slotBtns[slot]:FindFirstChildOfClass("UIStroke")
+        if st2 then st2:Destroy() end
+        mkStroke(slotBtns[slot],C.neon,2,0)
+    end)
+end
+
+WearSelBtn.MouseButton1Click:Connect(function()
+    local payload=S.bundleItems[S.selSlot]
+    if not payload or not LP.Character then return end
+    shimmer(WearSelBtn,C.neon,C.neon2)
+    WearSelBtn.Text="Loading…"
+    task.spawn(function()
+        local tracks=fetchAnims(payload.Id,payload.AssetType)
+        local pick=pickTrack(tracks,S.selSlot)
+        if pick then
+            pcall(ContentProv.PreloadAsync,ContentProv,{pick})
+            applySlot(LP.Character,S.selSlot,{pick})
+            showNotif(SLOT_LABELS[S.selSlot].." animation applied!","✓",C.neonG)
+        end
+        noShimmer(WearSelBtn); WearSelBtn.Text="▶  Wear Selected"
+    end)
+end)
+
+WearAllBtn.MouseButton1Click:Connect(function()
+    if not LP.Character then return end
+    shimmer(WearAllBtn,C.neonG,C.neon); WearAllBtn.Text="Loading…"
+    task.spawn(function()
+        local count=0
+        for slot,payload in pairs(S.bundleItems) do
+            local tracks=fetchAnims(payload.Id,payload.AssetType)
+            local pick=pickTrack(tracks,slot)
+            if pick and LP.Character then
+                applySlot(LP.Character,slot,{pick}); count=count+1
+            end
+        end
+        noShimmer(WearAllBtn); WearAllBtn.Text="▶▶ Wear All Slots"
+        showNotif("Applied "..count.." animations!","▶▶",C.neonG)
+    end)
+end)
+
+BookmarkBtn.MouseButton1Click:Connect(function()
+    if not S.bundleId then return end
+    local sid=tostring(S.bundleId)
+    if S.bookmarks[sid] then
+        S.bookmarks[sid]=nil
+        showNotif("Bundle removed from saved","☆",C.textMid)
+    else
+        S.bookmarks[sid]={Id=S.bundleId,Name=S.bundleName,time=tick()}
+        showNotif("Bundle saved: "..trunc(S.bundleName,20),"★",C.gold)
+    end
+    jWrite(F_BOOKMARKS,S.bookmarks); refreshBookmarkBtn()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  OVERLAYS
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function mkOverlay(title,borderCol)
+    local ov=Instance.new("Frame",Screen)
+    ov.Size=UDim2.fromOffset(px(290),px(120))
+    ov.Position=UDim2.new(0.5,-px(145),0.5,-px(60))
+    ov.BackgroundColor3=C.bg2; ov.Visible=false; ov.ZIndex=60
+    mkCorner(ov,px(14)); mkStroke(ov,borderCol or C.neon,2)
+    mkPad(ov,px(12),px(12),px(14),px(14))
+    mkAnimGrad(ov,C.bg2,C.bg3,3)
+
+    local tl=Instance.new("TextLabel",ov)
+    tl.Size=UDim2.new(1,0,0,px(22)); tl.BackgroundTransparency=1
+    tl.Text=title; tl.TextColor3=C.textHi
+    tl.Font=Enum.Font.GothamBold; tl.TextSize=px(13); tl.ZIndex=61
+
+    local box=Instance.new("TextBox",ov)
+    box.Size=UDim2.new(1,0,0,px(30)); box.Position=UDim2.fromOffset(0,px(26))
+    box.BackgroundColor3=C.bg3; box.TextColor3=C.textHi
+    box.Font=Enum.Font.Gotham; box.TextSize=px(12)
+    box.ClearTextOnFocus=false; box.ZIndex=61
+    mkCorner(box,px(7)); mkStroke(box,C.strokeHi,1,0.3)
+    mkPad(box,0,0,px(8),0)
+
+    local half2=math.floor((px(290)-px(28)-px(4))/2)
+    local function mkOvBtn(txt,bg,xOff,gradC)
+        local b=Instance.new("TextButton",ov)
+        b.Size=UDim2.fromOffset(half2,px(28))
+        b.Position=UDim2.fromOffset(xOff,px(70))
+        b.BackgroundColor3=bg; b.TextColor3=C.white
+        b.Text=txt; b.Font=Enum.Font.GothamBold; b.TextSize=px(11)
+        b.AutoButtonColor=false; b.ZIndex=61
+        mkCorner(b,px(8))
+        if gradC then mkAnimGrad(b,bg,gradC,2) end
+        hover(b,bg,C.cardHi); return b
+    end
+    local ok=mkOvBtn("Confirm",borderCol or C.neon,0,C.neon2)
+    local can=mkOvBtn("Cancel",C.bg4,half2+px(4))
+    can.MouseButton1Click:Connect(function() ov.Visible=false end)
+    return ov,box,ok
+end
+
+local SaveOv,SaveBox,SaveOk=mkOverlay("Name your Animation Set",C.neonP)
+local RenOv,RenBox,RenOk=mkOverlay("Rename Set",C.neon)
+
+SaveSetBtn.MouseButton1Click:Connect(function()
+    SaveBox.Text=""; SaveOv.Visible=true
+end)
+
+local function rebuildSets() end
+
+SaveOk.MouseButton1Click:Connect(function()
+    local name=(SaveBox.Text~="") and SaveBox.Text
+        or ("My Set "..(#S.presets+1))
+    SaveOv.Visible=false
+    local snap={}
+    for slot,animList in pairs(S.equipped) do
+        snap[slot]={}
+        for _,d in ipairs(animList) do
+            table.insert(snap[slot],{Name=d.Name,AnimationId=d.AnimationId})
+        end
+    end
+    table.insert(S.presets,{name=name,slots=snap,time=tick()})
+    jWrite(F_PRESETS,S.presets)
+    showNotif("Set saved: "..name,"✓",C.neonP)
+    if S.tab=="My Sets" then rebuildSets() end
+end)
+
+RenOk.MouseButton1Click:Connect(function()
+    local newName=RenBox.Text
+    if newName~="" and S.renameIdx and S.presets[S.renameIdx] then
+        S.presets[S.renameIdx].name=newName
+        jWrite(F_PRESETS,S.presets)
+        showNotif("Renamed to: "..newName,"✎",C.neon)
+    end
+    RenOv.Visible=false; rebuildSets()
+end)
+
+-- ─── My Sets ──────────────────────────────────────────────────────────
+rebuildSets=function()
+    for _,c2 in ipairs(SetsScroll:GetChildren()) do
+        if not c2:IsA("UIListLayout") and not c2:IsA("UIPadding") then c2:Destroy() end
+    end
+    if #S.presets==0 then
+        local el=Instance.new("TextLabel",SetsScroll)
+        el.Size=UDim2.new(1,-px(8),0,px(60)); el.BackgroundTransparency=1
+        el.Text="No sets saved yet.\n\nWear animations → ＋ Save as Set"
+        el.TextColor3=C.textLo; el.Font=Enum.Font.Gotham; el.TextSize=px(11)
+        el.TextWrapped=true
+        SetsScroll.CanvasSize=UDim2.new(0,0,0,px(70)); return
+    end
+    for idx,preset in ipairs(S.presets) do
+        local row=Instance.new("Frame",SetsScroll)
+        row.Size=UDim2.new(1,-px(8),0,px(58))
+        row.BackgroundColor3=C.card; row.BorderSizePixel=0
+        row.LayoutOrder=idx; mkCorner(row,px(10))
+        mkStroke(row,C.stroke,1,0.5)
+
+        -- Gradient accent left bar
+        local accent=Instance.new("Frame",row)
+        accent.Size=UDim2.fromOffset(px(3),px(58))
+        accent.BackgroundColor3=C.neonP; accent.BorderSizePixel=0
+        mkCorner(accent,px(2))
+        mkAnimGrad(accent,C.neonP,C.neon2,2)
+
+        local nLbl=Instance.new("TextLabel",row)
+        nLbl.Size=UDim2.new(1,-px(118),0,px(22))
+        nLbl.Position=UDim2.fromOffset(px(12),px(4))
+        nLbl.BackgroundTransparency=1; nLbl.Text=trunc(preset.name,24)
+        nLbl.TextColor3=C.textHi; nLbl.Font=Enum.Font.GothamBold
+        nLbl.TextSize=px(12); nLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+        local dots=Instance.new("Frame",row)
+        dots.Size=UDim2.new(1,-px(118),0,px(18))
+        dots.Position=UDim2.fromOffset(px(12),px(30))
+        dots.BackgroundTransparency=1
+        local dL=Instance.new("UIListLayout",dots)
+        dL.FillDirection=Enum.FillDirection.Horizontal
+        dL.Padding=UDim.new(0,px(2))
+
+        for _,slot in ipairs(SLOT_ORDER) do
+            if preset.slots and preset.slots[slot] and #preset.slots[slot]>0 then
+                local dot=Instance.new("Frame",dots)
+                dot.Size=UDim2.fromOffset(px(32),px(16))
+                dot.BackgroundColor3=C.neon; dot.BorderSizePixel=0
+                mkCorner(dot,px(4))
+                mkAnimGrad(dot,C.neon,C.neon2,2)
+                local dl=Instance.new("TextLabel",dot)
+                dl.Size=UDim2.new(1,0,1,0); dl.BackgroundTransparency=1
+                dl.Text=SLOT_LABELS[slot]; dl.TextColor3=C.white
+                dl.Font=Enum.Font.GothamBold; dl.TextSize=px(7)
+            end
+        end
+
+        local RW=px(28)
+        local function mkRBtn(txt,bg,xOff,hiBg)
+            local b=Instance.new("TextButton",row)
+            b.Size=UDim2.fromOffset(RW,RW)
+            b.Position=UDim2.new(1,xOff,0.5,-RW/2)
+            b.BackgroundColor3=bg; b.TextColor3=C.white
+            b.Text=txt; b.Font=Enum.Font.GothamBold; b.TextSize=px(11)
+            b.AutoButtonColor=false; mkCorner(b,px(7))
+            hover(b,bg,hiBg or C.cardHi); return b
+        end
+        local wBtn=mkRBtn("▶",C.neonG,-px(96),Color3.fromRGB(40,180,110))
+        local rBtn=mkRBtn("✎",C.bg4,-px(64))
+        local dBtn=mkRBtn("✕",C.neonR,-px(32),Color3.fromRGB(200,40,60))
+
+        wBtn.MouseButton1Click:Connect(function()
+            local char=LP.Character; if not char then return end
+            wBtn.Text="…"
+            task.spawn(function()
+                local count=0
+                for slot,animDataList in pairs(preset.slots) do
+                    if #animDataList>0 and char then
+                        local animObjs={}
+                        for _,d in ipairs(animDataList) do
+                            local a=Instance.new("Animation")
+                            a.Name,a.AnimationId=d.Name,d.AnimationId
+                            table.insert(animObjs,a)
+                        end
+                        applySlot(char,slot,animObjs); count=count+1
+                    end
+                end
+                if wBtn and wBtn.Parent then wBtn.Text="▶" end
+                showNotif("Set '"..trunc(preset.name,16).."' applied!","▶",C.neonG)
+            end)
+        end)
+
+        rBtn.MouseButton1Click:Connect(function()
+            S.renameIdx=idx; RenBox.Text=preset.name; RenOv.Visible=true
+        end)
+
+        dBtn.MouseButton1Click:Connect(function()
+            table.remove(S.presets,idx)
+            jWrite(F_PRESETS,S.presets)
+            showNotif("Set deleted","✕",C.neonR)
+            rebuildSets()
+        end)
+    end
+    SetsScroll.CanvasSize=UDim2.new(0,0,0,SetsList.AbsoluteContentSize.Y+px(8))
+end
+
+-- ─── Current Tab ──────────────────────────────────────────────────────
+local function rebuildCurrent()
+    for _,c2 in ipairs(CurScroll:GetChildren()) do
+        if not c2:IsA("UIListLayout") and not c2:IsA("UIPadding") then c2:Destroy() end
+    end
+    local hasAny=false
+    for _,slot in ipairs(SLOT_ORDER) do
+        local animList=S.equipped[slot]
+        if animList and #animList>0 then
+            hasAny=true
+            local row=Instance.new("Frame",CurScroll)
+            row.Size=UDim2.new(1,-px(8),0,px(46))
+            row.BackgroundColor3=C.card; row.BorderSizePixel=0
+            mkCorner(row,px(9)); mkStroke(row,C.stroke,1,0.5)
+
+            local accent2=Instance.new("Frame",row)
+            accent2.Size=UDim2.fromOffset(px(3),px(46))
+            accent2.BackgroundColor3=C.neon; accent2.BorderSizePixel=0
+            mkCorner(accent2,px(2)); mkAnimGrad(accent2,C.neon,C.neonG,2)
+
+            local iconLbl=Instance.new("TextLabel",row)
+            iconLbl.Size=UDim2.fromOffset(px(32),px(46))
+            iconLbl.Position=UDim2.fromOffset(px(8),0)
+            iconLbl.BackgroundTransparency=1
+            iconLbl.Text=(SLOT_ICONS[slot] or "").."\n"..SLOT_LABELS[slot]
+            iconLbl.TextColor3=C.neon; iconLbl.Font=Enum.Font.GothamBold
+            iconLbl.TextSize=px(8)
+
+            local aLbl=Instance.new("TextLabel",row)
+            aLbl.Size=UDim2.new(1,-px(116),1,0); aLbl.Position=UDim2.fromOffset(px(46),0)
+            aLbl.BackgroundTransparency=1
+            aLbl.Text=trunc(animList[1].Name or "?",22)
+            aLbl.TextColor3=C.textMid; aLbl.Font=Enum.Font.GothamSemibold
+            aLbl.TextSize=px(10); aLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+            local rmBtn=Instance.new("TextButton",row)
+            rmBtn.Size=UDim2.fromOffset(px(60),px(26))
+            rmBtn.Position=UDim2.new(1,-px(64),0.5,-px(13))
+            rmBtn.BackgroundColor3=C.neonR; rmBtn.TextColor3=C.white
+            rmBtn.Text="✕ Remove"; rmBtn.Font=Enum.Font.GothamBold
+            rmBtn.TextSize=px(8); rmBtn.AutoButtonColor=false
+            mkCorner(rmBtn,px(6))
+            hover(rmBtn,C.neonR,Color3.fromRGB(200,40,60))
+
+            rmBtn.MouseButton1Click:Connect(function()
+                S.equipped[slot]=nil; jWrite(F_EQUIPPED,S.equipped)
+                local char=LP.Character
+                if char then
+                    local anim=char:FindFirstChild("Animate")
+                    if anim then anim.Disabled=true; task.wait(0.05); anim.Disabled=false end
+                end
+                showNotif(SLOT_LABELS[slot].." animation removed","✕",C.neonR)
+                rebuildCurrent()
+            end)
+        end
+    end
+    if not hasAny then
+        local el=Instance.new("TextLabel",CurScroll)
+        el.Size=UDim2.new(1,-px(8),0,px(50)); el.BackgroundTransparency=1
+        el.Text="Nothing equipped yet.\nSearch and wear animations first!"
+        el.TextColor3=C.textLo; el.Font=Enum.Font.Gotham
+        el.TextSize=px(11); el.TextWrapped=true
+    end
+    CurScroll.CanvasSize=UDim2.new(0,0,0,CurList.AbsoluteContentSize.Y+px(8))
+end
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  GRID — AUTO SYNC NEW ANIMATIONS
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function killGridThreads()
+    for _,th in ipairs(S.gridThreads) do task.cancel(th) end; S.gridThreads={}
+end
+
+-- Auto-sync: immediately apply new bundle's animations to character
+local function autoSyncBundle(bundleId)
+    if not LP.Character then return end
+    task.spawn(function()
+        local ok,res=pcall(function() return AssetService:GetBundleDetailsAsync(bundleId) end)
+        if not ok or not res or not res.Items then return end
+        local char=LP.Character; if not char then return end
+        for _,item in ipairs(res.Items) do
+            local lt=string.lower(item.AssetType or "")
+            local targets={}
+            if lt=="swimanimation" then
+                targets={"swimanimation","swimidleanimation"}
+            elseif SLOT_LABELS[lt] then
+                targets={lt}
+            end
+            for _,slot in ipairs(targets) do
+                local tracks=fetchAnims(item.Id,item.AssetType)
+                local pick=pickTrack(tracks,slot)
+                if pick and char then
+                    applySlot(char,slot,{pick})
+                end
+            end
+        end
+    end)
+end
+
+local function makeRow(bundle)
+    local ROW_H=px(66)
+    local row=Instance.new("Frame",AnimScroll)
+    row.Size=UDim2.new(1,-px(8),0,ROW_H)
+    row.BackgroundColor3=C.card; row.BorderSizePixel=0
+    row.ClipsDescendants=true; mkCorner(row,px(10))
+    mkStroke(row,C.stroke,1,0.6)
+
+    -- Hover glow
+    row.MouseEnter:Connect(function()
+        tw(row,0.15,{BackgroundColor3=C.cardHi}):Play()
+        local st=row:FindFirstChildOfClass("UIStroke")
+        if st then tw(st,0.15,{Color=C.strokeHi,Transparency=0}):Play() end
+    end)
+    row.MouseLeave:Connect(function()
+        tw(row,0.15,{BackgroundColor3=C.card}):Play()
+        local st=row:FindFirstChildOfClass("UIStroke")
+        if st then tw(st,0.15,{Color=C.stroke,Transparency=0.6}):Play() end
+    end)
+
+    -- Left neon bar
+    local bar=Instance.new("Frame",row)
+    bar.Size=UDim2.fromOffset(px(3),ROW_H)
+    bar.BackgroundColor3=C.neon; bar.BorderSizePixel=0
+    mkCorner(bar,px(2)); mkAnimGrad(bar,C.neon,C.neon2,3)
+
+    -- Mini viewport
+    local miniVP=Instance.new("ViewportFrame",row)
+    miniVP.Size=UDim2.fromOffset(px(54),px(54))
+    miniVP.Position=UDim2.fromOffset(px(10),px(6))
+    miniVP.BackgroundColor3=C.overlay
+    miniVP.BackgroundTransparency=0.1; mkCorner(miniVP,px(8))
+    mkStroke(miniVP,C.strokeHi,1,0.5)
+
+    -- Bundle name
+    local nLbl=Instance.new("TextLabel",row)
+    nLbl.Size=UDim2.new(1,-px(148),0,px(22))
+    nLbl.Position=UDim2.fromOffset(px(72),px(4))
+    nLbl.BackgroundTransparency=1; nLbl.Text=trunc(bundle.Name or "?",26)
+    nLbl.TextColor3=C.textHi; nLbl.Font=Enum.Font.GothamBold
+    nLbl.TextSize=px(12); nLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+    -- ID label
+    local iLbl=Instance.new("TextLabel",row)
+    iLbl.Size=UDim2.new(1,-px(148),0,px(14))
+    iLbl.Position=UDim2.fromOffset(px(72),px(28))
+    iLbl.BackgroundTransparency=1; iLbl.Text="ID: "..tostring(bundle.Id)
+    iLbl.TextColor3=C.textLo; iLbl.Font=Enum.Font.Gotham
+    iLbl.TextSize=px(9); iLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+    -- NEW badge for recently added
+    local isSeen=S.bookmarks["seen_"..tostring(bundle.Id)]
+    if not isSeen then
+        local newBadge=Instance.new("TextLabel",row)
+        newBadge.Size=UDim2.fromOffset(px(28),px(14))
+        newBadge.Position=UDim2.fromOffset(px(72),px(44))
+        newBadge.BackgroundColor3=C.neon; newBadge.BorderSizePixel=0
+        newBadge.Text="NEW"; newBadge.TextColor3=C.white
+        newBadge.Font=Enum.Font.GothamBlack; newBadge.TextSize=px(7)
+        mkCorner(newBadge,px(3))
+        mkAnimGrad(newBadge,C.neon,C.neonP,1.5)
+    end
+
+    -- Star
+    local saved=S.bookmarks[tostring(bundle.Id)]~=nil
+    local starBtn=Instance.new("TextButton",row)
+    starBtn.Size=UDim2.fromOffset(px(24),px(24))
+    starBtn.Position=UDim2.new(1,-px(100),0.5,-px(12))
+    starBtn.BackgroundTransparency=1; starBtn.Text=saved and "★" or "☆"
+    starBtn.TextColor3=saved and C.gold or C.textLo
+    starBtn.Font=Enum.Font.GothamBold; starBtn.TextSize=px(18)
+    starBtn.AutoButtonColor=false
+
+    -- Quick wear button with gradient
+    local wBtn=Instance.new("TextButton",row)
+    wBtn.Size=UDim2.fromOffset(px(66),px(28))
+    wBtn.Position=UDim2.new(1,-px(70),0.5,-px(14))
+    wBtn.BackgroundColor3=C.neonG; wBtn.TextColor3=C.white
+    wBtn.Text="▶ Wear"; wBtn.Font=Enum.Font.GothamBold; wBtn.TextSize=px(9)
+    wBtn.AutoButtonColor=false; mkCorner(wBtn,px(7))
+    mkAnimGrad(wBtn,C.neonG,Color3.fromRGB(40,180,110),2)
+    hover(wBtn,C.neonG,Color3.fromRGB(40,180,110))
+
+    -- Hit area
+    local hitBtn=Instance.new("TextButton",row)
+    hitBtn.Size=UDim2.new(1,-px(100),1,0)
+    hitBtn.BackgroundTransparency=1; hitBtn.Text=""; hitBtn.ZIndex=2
+    hitBtn.MouseButton1Click:Connect(function()
+        -- Mark as seen
+        S.bookmarks["seen_"..tostring(bundle.Id)]=true
+        jWrite(F_BOOKMARKS,S.bookmarks)
+        inspectBundle(bundle.Id,bundle.Name)
+    end)
+
+    starBtn.MouseButton1Click:Connect(function()
+        local sid=tostring(bundle.Id)
+        if S.bookmarks[sid] then
+            S.bookmarks[sid]=nil
+            starBtn.Text,starBtn.TextColor3="☆",C.textLo
+            showNotif("Removed from saved","☆",C.textMid)
+        else
+            S.bookmarks[sid]={Id=bundle.Id,Name=bundle.Name,time=tick()}
+            starBtn.Text,starBtn.TextColor3="★",C.gold
+            showNotif("Saved: "..trunc(bundle.Name,18),"★",C.gold)
+        end
+        jWrite(F_BOOKMARKS,S.bookmarks)
+        if S.bundleId==bundle.Id then refreshBookmarkBtn() end
+    end)
+
+    wBtn.MouseButton1Click:Connect(function()
+        wBtn.Text="…"; wBtn.BackgroundColor3=C.bg4
+        -- Auto-sync: apply all slots immediately
+        task.spawn(function()
+            autoSyncBundle(bundle.Id)
+            if wBtn and wBtn.Parent then
+                wBtn.Text="▶ Wear"
+                wBtn.BackgroundColor3=C.neonG
+            end
+            showNotif("Wearing: "..trunc(bundle.Name,18),"▶",C.neonG)
+        end)
+    end)
+
+    -- Animated mini viewport
+    local loopTh=task.spawn(function()
+        local ok,det=pcall(function() return AssetService:GetBundleDetailsAsync(bundle.Id) end)
+        if not ok or not det or not det.Items then return end
+        local usable={}
+        for _,si in ipairs(det.Items) do
+            if SLOT_TO_FOLDER[string.lower(si.AssetType or "")] then
+                table.insert(usable,si)
+            end
+        end
+        if #usable==0 then return end
+        local mDummy,mAnim,mConn=buildSkeleton(miniVP)
+        if not mDummy then return end
+        local idx,curT=1,nil
+        while row and row.Parent do
+            local si=usable[idx]
+            local assets=fetchAnims(si.Id,si.AssetType)
+            if #assets>0 then
+                if curT then pcall(function() curT:Stop() end) end
+                local ok2,ct=safePT(mAnim,assets[1],true)
+                if ok2 then curT=ct end
+            end
+            task.wait(3.5); idx=(idx%#usable)+1
+        end
+        if mConn then mConn:Disconnect() end
+    end)
+    table.insert(S.gridThreads,loopTh)
+    row.Destroying:Connect(function() task.cancel(loopTh) end)
+    return row
+end
+
+local function drawPage(list)
+    killGridThreads()
+    for _,c2 in ipairs(AnimScroll:GetChildren()) do
+        if not c2:IsA("UIListLayout") and not c2:IsA("UIPadding") then c2:Destroy() end
+    end
+    LoadFrame.Visible=false
+    local s2=(S.page-1)*S.perPage+1
+    local e2=math.min(S.page*S.perPage,#list)
+    for i=s2,e2 do if list[i] then makeRow(list[i]) end end
+    AnimScroll.CanvasSize=UDim2.new(0,0,0,AnimList.AbsoluteContentSize.Y+px(8))
+    AnimScroll.CanvasPosition=Vector2.zero
+    local totalPages=math.max(1,math.ceil(#list/S.perPage))
+    PageLbl.Text=("Page %d / %d"):format(S.page,totalPages)
+    PrevBtn.BackgroundColor3=S.page>1 and C.bg4 or C.bg3
+    PrevBtn.TextColor3=S.page>1 and C.textMid or C.textLo
+end
+
+-- ── Search with auto-sync detection ───────────────────────────────────
+local lastSearchCount=0
+
+local function doSearch(query)
+    S.page=1; LoadFrame.Visible=true; killGridThreads()
+    if S.tab~="Animations" then return end
+    S.searchList={}; S.catCursor=nil
+    local p=CatalogSearchParams.new()
+    p.SearchKeyword=query or ""; p.BundleTypes={Enum.BundleType.Animations}
+    p.IncludeOffSale=true; p.Limit=60
+    pcall(function() p.SalesTypeFilter=Enum.SalesTypeFilter.All end)
+    pcall(function() p.SortType=Enum.CatalogSortType.RecentlyCreated end)
+    task.spawn(function()
+        local ok,pages=pcall(function() return AvatarEditor:SearchCatalog(p) end)
+        if ok and pages then
+            S.catCursor=pages; S.searchList=pages:GetCurrentPage()
+            -- Detect new animations
+            local newCount=#S.searchList
+            if lastSearchCount>0 and newCount>lastSearchCount and query=="" then
+                local diff=newCount-lastSearchCount
+                showNotif(diff.." new animation"..
+                    (diff>1 and "s" or "").." found!","✨",C.gold,4)
+            end
+            lastSearchCount=newCount
+            drawPage(S.searchList)
+        else
+            LoadFrame.Visible=false; PageLbl.Text="Search error"
+            showNotif("Search failed. Try again.","✕",C.neonR)
+        end
+    end)
+end
+
+SBtn.MouseButton1Click:Connect(function()
+    if S.tab=="Animations" then doSearch(SBox.Text) end
+end)
+SBox.FocusLost:Connect(function(enter)
+    if enter and S.tab=="Animations" then doSearch(SBox.Text) end
+end)
+
+NextBtn.MouseButton1Click:Connect(function()
+    if S.page*S.perPage<#S.searchList then
+        S.page=S.page+1; drawPage(S.searchList)
+    elseif S.tab=="Animations" and S.catCursor and not S.catCursor.IsFinished then
+        LoadFrame.Visible=true
+        task.spawn(function()
+            local ok=pcall(function() S.catCursor:AdvanceToNextPageAsync() end)
+            if ok then
+                local more=S.catCursor:GetCurrentPage()
+                for _,v in ipairs(more) do table.insert(S.searchList,v) end
+                S.page=S.page+1; drawPage(S.searchList)
+            end
+        end)
+    end
+end)
+PrevBtn.MouseButton1Click:Connect(function()
+    if S.page>1 then S.page=S.page-1; drawPage(S.searchList) end
+end)
+
+-- ── Tab switching ─────────────────────────────────────────────────────
+local function showTab(name)
+    setTab(name)
+    AnimScroll.Visible=(name=="Animations")
+    SetsScroll.Visible=(name=="My Sets")
+    CurScroll.Visible=(name=="Current")
+    SRow.Visible=(name=="Animations")
+    PageBar.Visible=(name=="Animations")
+    LoadFrame.Visible=false
+    if name=="Animations" then
+        if #S.searchList==0 then doSearch("") else drawPage(S.searchList) end
+    elseif name=="My Sets" then rebuildSets()
+    elseif name=="Current" then rebuildCurrent()
+    end
+end
+
+for tName,tb in pairs(tabBtns) do
+    tb.MouseButton1Click:Connect(function() showTab(tName) end)
+end
+
+-- ── Respawn handler ───────────────────────────────────────────────────
+LP.CharacterAdded:Connect(function()
+    task.spawn(function()
+        task.wait(2.5)
+        if not next(S.equipped) then return end
+        showNotif("Animations auto-restored!","✓",C.neonG,4)
+    end)
+end)
+
+-- ── Auto-refresh new animations every 5 min ───────────────────────────
+task.spawn(function()
+    while true do
+        task.wait(300)
+        if S.tab=="Animations" and SBox.Text=="" then
+            local oldCount=#S.searchList
+            local p=CatalogSearchParams.new()
+            p.SearchKeyword=""; p.BundleTypes={Enum.BundleType.Animations}
+            p.IncludeOffSale=true; p.Limit=60
+            pcall(function() p.SalesTypeFilter=Enum.SalesTypeFilter.All end)
+            pcall(function() p.SortType=Enum.CatalogSortType.RecentlyCreated end)
+            local ok,pages=pcall(function() return AvatarEditor:SearchCatalog(p) end)
+            if ok and pages then
+                local fresh=pages:GetCurrentPage()
+                if #fresh>oldCount then
+                    S.searchList=fresh
+                    showNotif(#fresh-oldCount.." new animations added!","✨",C.gold,5)
+                    if S.tab=="Animations" then drawPage(S.searchList) end
+                end
+            end
+        end
+    end
+end)
+
+-- ── Boot ──────────────────────────────────────────────────────────────
+Win.Size=UDim2.fromOffset(0,0)
+Win.Position=UDim2.new(0.5,0,0.5,0)
+task.delay(0.1,function()
+    tw(Win,0.45,{
+        Size=UDim2.fromOffset(WIN_W,WIN_H),
+        Position=UDim2.new(0.5,-WIN_W/2,0.5,-WIN_H/2)
+    },Enum.EasingStyle.Back):Play()
+    task.wait(0.47)
+    showTab("Animations")
+    task.wait(0.5)
+    showNotif("Fe UGC Animations v3.0 loaded!","▶",C.neon,3)
+end)
+```
+
+---
+
+## Что улучшено
+
+### 🎨 Дизайн
+| Элемент | Детали |
+|---|---|
+| **Neon Glass** | 5-уровневая тёмная палитра + неоновые акценты |
+| **Анимированные градиенты** | Каждая кнопка / полоска / бейдж пульсирует |
+| **Glow эффекты** | Неоновое свечение на иконках и бордерах |
+| **Анимированный бордер окна** | Цвет плавно меняется neon→purple→green→pink |
+| **Slot кнопки с иконками** | 🧍🚶🏃⬆⬇🧗🏊🌊 |
+| **NEW бейдж** | Мигающий бейдж на новых анимациях |
+
+### 🔔 Система уведомлений
+```
+• Стек уведомлений в правом нижнем углу
+• Progress bar показывает время жизни
+• Разные цвета: зелёный/красный/золотой/синий
+• Slide-in анимация с EasingStyle.Back
+```
+
+### ⚡ Авто-синхронизация новых анимаций
+```
+• Кнопка ▶ Wear → моментально надевает ВСЕ слоты
+• Фоновый опрос каждые 5 минут
+• При обнаружении новых → уведомление "X new animations added!"
+• NEW бейдж на непросмотренных бандлах
+```
